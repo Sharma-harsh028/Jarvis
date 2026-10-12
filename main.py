@@ -2,6 +2,7 @@ import json
 from pathlib import Path
 
 import ollama
+from memory_store import remember, list_facts, forget_fact, load_facts
 
 MODEL = "llama3.2:3b"
 MEMORY_FILE = Path(__file__).with_name("memory.json")
@@ -11,7 +12,8 @@ SYSTEM_MESSAGE = {
     "content": (
         "You are Jarvis, Harsh's personal AI assistant. "
         "Be helpful, clear, friendly, and honest. "
-        "Use the conversation history when it is relevant."
+        "Use conversation history and provided saved facts when relevant. "
+        "Do not claim to remember facts that are not provided to you."
     ),
 }
 
@@ -26,7 +28,7 @@ def load_history():
         )
 
         if not isinstance(history, list):
-            raise ValueError("Memory must be a list.")
+            raise ValueError("Conversation history must be a list.")
 
         return [
             message
@@ -37,13 +39,13 @@ def load_history():
         ]
 
     except (OSError, json.JSONDecodeError, ValueError) as error:
-        print(f"Could not load memory: {error}")
+        print(f"Could not load history: {error}")
         print("Starting with an empty conversation.")
         return []
 
 
 def save_history(messages):
-    history = messages[1:]  # Exclude the system instructions.
+    history = messages[1:]
     temporary_file = MEMORY_FILE.with_suffix(".tmp")
 
     temporary_file.write_text(
@@ -57,7 +59,12 @@ messages = [SYSTEM_MESSAGE] + load_history()
 
 print("🤖 Jarvis is online!")
 print(f"🧠 Loaded {len(messages) - 1} previous messages.")
-print("Type 'exit' to quit or 'clear' to erase conversation memory.\n")
+print("Commands:")
+print("  remember: <fact>  Save an important fact")
+print("  memory            List saved facts")
+print("  forget: <number>  Delete a saved fact")
+print("  clear             Clear conversation history")
+print("  exit              Quit Jarvis\n")
 
 while True:
     try:
@@ -67,14 +74,38 @@ while True:
             print("Jarvis: Signing off, Harsh!")
             break
 
-        if user_text.lower() == "clear":
+        if not user_text:
+            continue
+
+        command = user_text.lower()
+
+        if command == "memory":
+            print(f"\nJarvis: Saved facts:\n{list_facts()}\n")
+            continue
+
+        if command.startswith("remember:"):
+            fact = user_text[len("remember:"):].strip()
+            print(f"\nJarvis: {remember(fact)}\n")
+            continue
+
+        if command.startswith("forget:"):
+            number_text = user_text[len("forget:"):].strip()
+
+            try:
+                number = int(number_text)
+                print(f"\nJarvis: {forget_fact(number)}\n")
+            except ValueError:
+                print("\nJarvis: Use 'forget: 1' with a valid fact number.\n")
+            continue
+
+        if command == "clear":
             messages = [SYSTEM_MESSAGE]
             if MEMORY_FILE.exists():
                 MEMORY_FILE.unlink()
-            print("Jarvis: Conversation memory cleared.\n")
-            continue
-
-        if not user_text:
+            print(
+                "\nJarvis: Conversation history cleared. "
+                "Your saved facts are unchanged.\n"
+            )
             continue
 
         messages.append({
@@ -82,10 +113,27 @@ while True:
             "content": user_text,
         })
 
+        chat_messages = [SYSTEM_MESSAGE]
+        facts = load_facts()
+
+        if facts:
+            facts_text = "\n".join(
+                f"- {item['fact']}" for item in facts
+            )
+            chat_messages.append({
+                "role": "system",
+                "content": (
+                    "These are facts explicitly saved by the user. "
+                    "Use them when relevant:\n" + facts_text
+                ),
+            })
+
+        chat_messages.extend(messages[1:])
+
         try:
             response = ollama.chat(
                 model=MODEL,
-                messages=messages,
+                messages=chat_messages,
             )
         except Exception as error:
             messages.pop()
@@ -99,11 +147,15 @@ while True:
             "content": answer,
         })
 
-        save_history(messages)
+        try:
+            save_history(messages)
+        except OSError as error:
+            print(f"Warning: Could not save conversation history: {error}")
+
         print(f"\nJarvis: {answer}\n")
 
     except KeyboardInterrupt:
         print("\nJarvis: Goodbye, Harsh!")
         break
     except OSError as error:
-        print(f"\nMemory file error: {error}\n")
+        print(f"\nFile error: {error}\n")
